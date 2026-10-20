@@ -37,7 +37,6 @@ class MainActivity : AppCompatActivity() {
     private var isRecording = false
     private lateinit var tempCacheFile: File
     
-    // Standar AI TTS: 24000 Hz Mono 16-bit untuk kejernihan maksimal
     private val sampleRate = 24000
     private val channelConfig = AudioFormat.CHANNEL_IN_MONO
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
@@ -201,7 +200,6 @@ class MainActivity : AppCompatActivity() {
             audioRecord = null
         }
 
-        // Beri jeda sejenak agar STT sempat merespons teks akhir
         lifecycleScope.launch {
             delay(600)
             showPreviewDialog()
@@ -220,7 +218,7 @@ class MainActivity : AppCompatActivity() {
                 mediaPlayer?.release()
                 saveFinalWavFile()
             }
-            .setNeutralButton("Putar Ulang") { dialog, _ ->
+            .setNeutralButton("Putar Ulang") { _, _ ->
                 try {
                     val previewWav = File(cacheDir, "preview.wav")
                     tempCacheFile.toNormalizedWavFile(previewWav, sampleRate, 1, 16)
@@ -229,7 +227,7 @@ class MainActivity : AppCompatActivity() {
                         prepare()
                         start()
                     }
-                    Toast.init(this, "Memutar audio studio...", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Memutar audio studio...", Toast.LENGTH_SHORT).show()
                 } catch (e: Exception) {
                     Toast.makeText(this, "Gagal memutar audio", Toast.LENGTH_SHORT).show()
                 }
@@ -249,20 +247,17 @@ class MainActivity : AppCompatActivity() {
         val safeName = if (transcribedText.isBlank()) "dataset_${System.currentTimeMillis()}" else transcribedText
         val finalFile = File(filesDir, "$safeName.wav")
         
-        // Konversi PCM mentah ke WAV dengan Normalisasi Puncak (Studio Grade)
         tempCacheFile.toNormalizedWavFile(finalFile, sampleRate, 1, 16)
         tempCacheFile.delete()
 
         Toast.makeText(this, "Disimpan: $safeName.wav", Toast.LENGTH_LONG).show()
     }
 
-    // Algoritma Studio Quality: Peak Normalization pada header & byte stream PCM
     private fun File.toNormalizedWavFile(targetWav: File, sampleRate: Int, channels: Int, bitRate: Int) {
         val bytes = this.readBytes()
         if (bytes.isEmpty()) return
 
-        // Cari peak amplitudo untuk normalisasi studio grade (mencegah clipping & suara terlalu kecil)
-        var maxAmplitude = 0.short
+        var maxAmplitude = 0.toShort()
         val shortBuffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
         while (shortBuffer.hasRemaining()) {
             val sample = kotlin.math.abs(shortBuffer.get().toInt())
@@ -271,9 +266,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Terapkan gain scaling jika amplitudo tidak 0
         val normalizedBytes = if (maxAmplitude > 0 && maxAmplitude < 32767) {
-            val gain = 30000.0 / maxAmplitude.toDouble() // Target peak dekat max 16-bit
+            val gain = 30000.0 / maxAmplitude.toDouble()
             val outBuffer = java.nio.ByteBuffer.allocate(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
             shortBuffer.rewind()
             while (shortBuffer.hasRemaining()) {
