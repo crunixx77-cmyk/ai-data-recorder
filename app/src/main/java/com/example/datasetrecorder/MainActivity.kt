@@ -12,22 +12,19 @@ import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.view.MotionEvent
 import android.widget.Button
+import android.widget.EditText
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.*
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -42,9 +39,6 @@ class MainActivity : AppCompatActivity() {
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
     private var bufferSize = 0
 
-    private var speechRecognizer: SpeechRecognizer? = null
-    private var transcribedText: String = "rekaman_ai"
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -58,8 +52,6 @@ class MainActivity : AppCompatActivity() {
             bufferSize = sampleRate * 2
         }
 
-        setupSpeechRecognizer()
-
         btnRecord.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -70,8 +62,10 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     vibratePhone()
-                    startAudioRecording()
-                    startSpeechToText()
+                    lifecycleScope.launch {
+                        delay(50)
+                        startAudioRecording()
+                    }
                     if (isRecording) {
                         btnRecord.text = "Merekam... Lepas untuk Selesai"
                     }
@@ -81,7 +75,6 @@ class MainActivity : AppCompatActivity() {
                     if (isRecording) {
                         vibratePhone()
                         stopAudioRecording()
-                        stopSpeechToText()
                     }
                     btnRecord.text = "Tekan & Tahan untuk Merekam"
                     true
@@ -104,57 +97,24 @@ class MainActivity : AppCompatActivity() {
     private fun vibratePhone() {
         val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
+            vibrator.vibrate(VibrationEffect.createOneShot(40, VibrationEffect.DEFAULT_AMPLITUDE))
         } else {
-            vibrator.vibrate(50)
+            vibrator.vibrate(40)
         }
-    }
-
-    private fun setupSpeechRecognizer() {
-        if (SpeechRecognizer.isRecognitionAvailable(this)) {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-            speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {}
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
-                override fun onError(error: Int) {}
-                override fun onResults(results: Bundle?) {
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    if (!matches.isNullOrEmpty()) {
-                        transcribedText = matches[0]
-                            .lowercase(Locale.getDefault())
-                            .replace(Regex("[^a-z0-9 ]"), "")
-                            .replace(Regex("\\s+"), "_")
-                    }
-                }
-                override fun onPartialResults(partialResults: Bundle?) {}
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-        }
-    }
-
-    private fun startSpeechToText() {
-        transcribedText = "rekaman_${System.currentTimeMillis()}"
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "id-ID")
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-        }
-        speechRecognizer?.startListening(intent)
-    }
-
-    private fun stopSpeechToText() {
-        speechRecognizer?.stopListening()
     }
 
     private fun startAudioRecording() {
         tempCacheFile = File(cacheDir, "temp_rec.pcm")
 
         try {
+            val audioSource = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                MediaRecorder.AudioSource.UNPROCESSED
+            } else {
+                MediaRecorder.AudioSource.MIC
+            }
+
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                audioSource,
                 sampleRate,
                 channelConfig,
                 audioFormat,
@@ -162,8 +122,13 @@ class MainActivity : AppCompatActivity() {
             )
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                audioRecord = null
-                return
+                audioRecord = AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    sampleRate,
+                    channelConfig,
+                    audioFormat,
+                    bufferSize
+                )
             }
 
             audioRecord?.startRecording()
@@ -171,16 +136,14 @@ class MainActivity : AppCompatActivity() {
 
             lifecycleScope.launch(Dispatchers.IO) {
                 val data = ByteArray(bufferSize)
-                val outputStream = FileOutputStream(tempCacheFile)
-                try {
+                FileOutputStream(tempCacheFile).use { outputStream ->
                     while (isRecording) {
                         val read = audioRecord?.read(data, 0, data.size) ?: 0
                         if (read > 0) {
                             outputStream.write(data, 0, read)
                         }
                     }
-                } finally {
-                    outputStream.close()
+                    outputStream.flush()
                 }
             }
         } catch (e: Exception) {
@@ -201,33 +164,55 @@ class MainActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch {
-            delay(600)
+            delay(300)
             showPreviewDialog()
         }
+    }
+
+    private fun getNextDefaultFileName(): String {
+        val files = filesDir.listFiles { _, name -> name.startsWith("suara_") && name.endsWith(".wav") }
+        var maxId = 0
+        files?.forEach { file ->
+            val numStr = file.name.removePrefix("suara_").removeSuffix(".wav")
+            val num = numStr.toIntOrNull()
+            if (num != null && num > maxId) {
+                maxId = num
+            }
+        }
+        return String.format("suara_%03d", maxId + 1)
     }
 
     private fun showPreviewDialog() {
         if (!tempCacheFile.exists()) return
 
         var mediaPlayer: MediaPlayer? = null
-        
+        val defaultName = getNextDefaultFileName()
+        val inputEditText = EditText(this).apply {
+            hint = "Nama file (misal: suara_001)"
+            setText(defaultName)
+            setSelection(text.length)
+        }
+
         AlertDialog.Builder(this)
-            .setTitle("Pratinjau Dataset AI")
-            .setMessage("Transkripsi Otomatis:\n\"$transcribedText\"\n\nSilakan dengarkan atau pilih tindakan:")
+            .setTitle("Pratinjau Rekaman AI")
+            .setMessage("Masukkan nama file WAV:")
+            .setView(inputEditText)
             .setPositiveButton("Simpan") { _, _ ->
                 mediaPlayer?.release()
-                saveFinalWavFile()
+                val customName = inputEditText.text.toString().trim()
+                val finalName = if (customName.isBlank()) defaultName else customName
+                saveFinalWavFile(finalName)
             }
             .setNeutralButton("Putar Ulang") { _, _ ->
                 try {
                     val previewWav = File(cacheDir, "preview.wav")
-                    tempCacheFile.toNormalizedWavFile(previewWav, sampleRate, 1, 16)
+                    tempCacheFile.toRawWavFile(previewWav, sampleRate, 1, 16)
                     mediaPlayer = MediaPlayer().apply {
                         setDataSource(previewWav.absolutePath)
                         prepare()
                         start()
                     }
-                    Toast.makeText(this, "Memutar audio studio...", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Memutar pratinjau...", Toast.LENGTH_SHORT).show()
                 } catch (e: Exception) {
                     Toast.makeText(this, "Gagal memutar audio", Toast.LENGTH_SHORT).show()
                 }
@@ -243,43 +228,21 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun saveFinalWavFile() {
-        val safeName = if (transcribedText.isBlank()) "dataset_${System.currentTimeMillis()}" else transcribedText
+    private fun saveFinalWavFile(fileName: String) {
+        val safeName = if (fileName.isBlank()) getNextDefaultFileName() else fileName
         val finalFile = File(filesDir, "$safeName.wav")
         
-        tempCacheFile.toNormalizedWavFile(finalFile, sampleRate, 1, 16)
+        tempCacheFile.toRawWavFile(finalFile, sampleRate, 1, 16)
         tempCacheFile.delete()
 
         Toast.makeText(this, "Disimpan: $safeName.wav", Toast.LENGTH_LONG).show()
     }
 
-    private fun File.toNormalizedWavFile(targetWav: File, sampleRate: Int, channels: Int, bitRate: Int) {
-        val bytes = this.readBytes()
-        if (bytes.isEmpty()) return
+    private fun File.toRawWavFile(targetWav: File, sampleRate: Int, channels: Int, bitRate: Int) {
+        val pcmBytes = this.readBytes()
+        if (pcmBytes.isEmpty()) return
 
-        var maxAmplitude = 0.toShort()
-        val shortBuffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-        while (shortBuffer.hasRemaining()) {
-            val sample = kotlin.math.abs(shortBuffer.get().toInt())
-            if (sample > maxAmplitude) {
-                maxAmplitude = sample.toShort()
-            }
-        }
-
-        val normalizedBytes = if (maxAmplitude > 0 && maxAmplitude < 32767) {
-            val gain = 30000.0 / maxAmplitude.toDouble()
-            val outBuffer = java.nio.ByteBuffer.allocate(bytes.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-            shortBuffer.rewind()
-            while (shortBuffer.hasRemaining()) {
-                val scaled = (shortBuffer.get() * gain).toInt().coerceIn(-32768, 32767).toShort()
-                outBuffer.putShort(scaled)
-            }
-            outBuffer.array()
-        } else {
-            bytes
-        }
-
-        val pcmLength = normalizedBytes.size.toLong()
+        val pcmLength = pcmBytes.size.toLong()
         val totalDataLen = pcmLength + 36
         val byteRate = (sampleRate * channels * bitRate) / 8
 
@@ -310,10 +273,10 @@ class MainActivity : AppCompatActivity() {
         header[42] = ((pcmLength ushr 16) and 0xff).toByte()
         header[43] = ((pcmLength ushr 24) and 0xff).toByte()
 
-        val output = FileOutputStream(targetWav)
-        output.write(header)
-        output.write(normalizedBytes)
-        output.close()
+        FileOutputStream(targetWav).use { output ->
+            output.write(header)
+            output.write(pcmBytes)
+        }
     }
 
     private fun showRecordingsDialog() {
@@ -350,12 +313,28 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "Gagal memutar audio", Toast.LENGTH_SHORT).show()
                 }
             }
-            .setNeutralButton("Hapus") { _, _ ->
+            .setNeutralButton("Bagikan") { _, _ ->
+                shareAudioFile(file)
+            }
+            .setNegativeButton("Hapus") { _, _ ->
                 if (file.delete()) {
                     Toast.makeText(this, "File dihapus", Toast.LENGTH_SHORT).show()
                 }
             }
-            .setNegativeButton("Batal", null)
             .show()
+    }
+
+    private fun shareAudioFile(file: File) {
+        try {
+            val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "audio/wav"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(intent, "Bagikan Dataset Audio"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Gagal membagikan file: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 }
